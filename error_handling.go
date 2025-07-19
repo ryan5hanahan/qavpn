@@ -2,9 +2,9 @@ package main
 
 import (
 	"crypto/rand"
+	"encoding/binary"
 	"errors"
 	"fmt"
-	mathrand "math/rand"
 	"sync"
 	"time"
 )
@@ -19,6 +19,9 @@ const (
 	ErrorTypeRoute
 	ErrorTypeConnection
 	ErrorTypeSystem
+	ErrorTypeDirect
+	ErrorTypeInvitation
+	ErrorTypeHandshake
 )
 
 // SecurityError represents a security-sensitive error that requires secure handling
@@ -116,6 +119,18 @@ func (seh *SecureErrorHandler) classifyError(err error, context string) *Securit
 	case containsAny(errMsg, []string{"route", "hop", "node", "relay"}):
 		errorType = ErrorTypeRoute
 		recoverable = true // Route errors are recoverable by selecting new routes
+		sensitiveData = false
+	case containsAny(errMsg, []string{"direct", "direct connection", "direct mode"}):
+		errorType = ErrorTypeDirect
+		recoverable = true // Direct connection errors are usually recoverable
+		sensitiveData = false
+	case containsAny(errMsg, []string{"invitation", "invitation code", "expired", "invalid invitation"}):
+		errorType = ErrorTypeInvitation
+		recoverable = false // Invitation errors require new invitation
+		sensitiveData = true // May contain connection details
+	case containsAny(errMsg, []string{"handshake", "role", "negotiation", "conflict"}):
+		errorType = ErrorTypeHandshake
+		recoverable = true // Handshake errors can be recovered with retry
 		sensitiveData = false
 	default:
 		errorType = ErrorTypeSystem
@@ -231,8 +246,8 @@ func (seh *SecureErrorHandler) attemptRecovery(secErr *SecurityError) error {
 
 // recoverNetworkError attempts to recover from network errors
 func (seh *SecureErrorHandler) recoverNetworkError(secErr *SecurityError) error {
-	// Add random delay to prevent timing attacks
-	delay := time.Duration(100+mathrand.Intn(400)) * time.Millisecond
+	// Add random delay to prevent timing attacks using crypto/rand
+	delay := generateSecureRandomDelay(100*time.Millisecond, 500*time.Millisecond)
 	time.Sleep(delay)
 
 	// Network errors are typically handled by higher-level retry logic
@@ -245,6 +260,21 @@ func (seh *SecureErrorHandler) recoverNetworkError(secErr *SecurityError) error 
 		Recoverable: true,
 		SensitiveData: false,
 	}
+}
+
+// generateSecureRandomDelay generates a cryptographically secure random delay
+func generateSecureRandomDelay(min, max time.Duration) time.Duration {
+	randBytes := make([]byte, 8)
+	if _, err := rand.Read(randBytes); err != nil {
+		// Fallback to minimum delay on error
+		return min
+	}
+	randValue := binary.LittleEndian.Uint64(randBytes)
+	delayRange := max - min
+	if delayRange <= 0 {
+		return min
+	}
+	return min + time.Duration(randValue%uint64(delayRange))
 }
 
 // recoverRouteError attempts to recover from routing errors
@@ -337,6 +367,12 @@ func (seh *SecureErrorHandler) errorTypeString(errorType ErrorType) string {
 		return "CONNECTION"
 	case ErrorTypeSystem:
 		return "SYSTEM"
+	case ErrorTypeDirect:
+		return "DIRECT"
+	case ErrorTypeInvitation:
+		return "INVITATION"
+	case ErrorTypeHandshake:
+		return "HANDSHAKE"
 	default:
 		return "UNKNOWN"
 	}
@@ -359,6 +395,9 @@ func (seh *SecureErrorHandler) GetErrorStatistics() map[string]interface{} {
 	stats["route_errors"] = seh.errorCounts[ErrorTypeRoute]
 	stats["connection_errors"] = seh.errorCounts[ErrorTypeConnection]
 	stats["system_errors"] = seh.errorCounts[ErrorTypeSystem]
+	stats["direct_errors"] = seh.errorCounts[ErrorTypeDirect]
+	stats["invitation_errors"] = seh.errorCounts[ErrorTypeInvitation]
+	stats["handshake_errors"] = seh.errorCounts[ErrorTypeHandshake]
 	stats["is_shutting_down"] = seh.isShuttingDown
 
 	return stats

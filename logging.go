@@ -460,32 +460,55 @@ func (cm *ConnectionMonitor) checkTunnelManagerHealth() {
 		Details:   make(map[string]interface{}),
 	}
 
-	// Get tunnel statistics
-	activeTunnels := cm.tunnelManager.GetActiveTunnels()
-	healthCheck.Details["active_tunnels"] = len(activeTunnels)
-
-	// Determine health status based on active tunnels
-	if len(activeTunnels) > 0 {
-		healthCheck.Status = HealthStatusHealthy
+	// Check if tunnel manager is available (nil check for relay nodes)
+	if cm.tunnelManager == nil {
+		// For relay nodes, tunnel manager is not applicable
+		healthCheck.Status = HealthStatusHealthy // Not applicable, but system is healthy
+		healthCheck.Details["active_tunnels"] = 0
+		healthCheck.Details["tunnel_manager_available"] = false
+		healthCheck.Details["note"] = "TunnelManager not applicable for relay nodes"
 		healthCheck.LastSuccess = time.Now()
 		healthCheck.FailureCount = 0
+		
+		cm.logger.Debug("connection_monitor", "Tunnel manager health check completed - not applicable for relay node", map[string]interface{}{
+			"status": cm.healthStatusString(healthCheck.Status),
+			"tunnel_manager_available": false,
+		})
 	} else {
-		healthCheck.Status = HealthStatusDegraded
-		healthCheck.FailureCount++
+		// Get tunnel statistics safely
+		activeTunnels := cm.tunnelManager.GetActiveTunnels()
+		healthCheck.Details["active_tunnels"] = len(activeTunnels)
+		healthCheck.Details["tunnel_manager_available"] = true
+
+		// Determine health status based on active tunnels
+		if len(activeTunnels) > 0 {
+			healthCheck.Status = HealthStatusHealthy
+			healthCheck.LastSuccess = time.Now()
+			healthCheck.FailureCount = 0
+		} else {
+			healthCheck.Status = HealthStatusDegraded
+			healthCheck.FailureCount++
+		}
+
+		cm.logger.Debug("connection_monitor", "Tunnel manager health check completed", map[string]interface{}{
+			"status": cm.healthStatusString(healthCheck.Status),
+			"active_tunnels": len(activeTunnels),
+		})
 	}
 
 	cm.mutex.Lock()
 	cm.healthChecks[component] = healthCheck
 	cm.mutex.Unlock()
-
-	cm.logger.Debug("connection_monitor", "Tunnel manager health check completed", map[string]interface{}{
-		"status": cm.healthStatusString(healthCheck.Status),
-		"active_tunnels": len(activeTunnels),
-	})
 }
 
 // checkTunnelHealth checks the health of individual tunnels
 func (cm *ConnectionMonitor) checkTunnelHealth() {
+	// Skip tunnel health checks if tunnel manager is not available (relay nodes)
+	if cm.tunnelManager == nil {
+		cm.logger.Debug("connection_monitor", "Skipping individual tunnel health checks - TunnelManager not available", nil)
+		return
+	}
+
 	activeTunnels := cm.tunnelManager.GetActiveTunnels()
 	
 	for _, tunnelStats := range activeTunnels {
@@ -529,6 +552,52 @@ func (cm *ConnectionMonitor) checkTunnelHealth() {
 			})
 		}
 	}
+
+	// Also check direct connection health if direct integration is available
+	cm.checkDirectConnectionHealth()
+}
+
+// checkDirectConnectionHealth checks the health of direct connections
+func (cm *ConnectionMonitor) checkDirectConnectionHealth() {
+	integrator := GetGlobalDirectIntegrator()
+	if integrator == nil {
+		return // Direct integration not available
+	}
+
+	// Clean up inactive tunnels first
+	integrator.CleanupInactiveTunnels()
+
+	// Check direct connection health
+	activeTunnelCount := integrator.GetActiveTunnelCount()
+	
+	component := "direct_connections"
+	healthCheck := &HealthCheck{
+		Component: component,
+		LastCheck: time.Now(),
+		Details:   make(map[string]interface{}),
+	}
+
+	healthCheck.Details["active_direct_tunnels"] = activeTunnelCount
+	healthCheck.Details["has_active_connections"] = integrator.HasActiveDirectConnections()
+
+	if integrator.HasActiveDirectConnections() {
+		healthCheck.Status = HealthStatusHealthy
+		healthCheck.LastSuccess = time.Now()
+		healthCheck.FailureCount = 0
+		
+		cm.logger.Debug("connection_monitor", "Direct connections healthy", map[string]interface{}{
+			"active_tunnels": activeTunnelCount,
+		})
+	} else {
+		healthCheck.Status = HealthStatusDegraded
+		healthCheck.FailureCount++
+		
+		cm.logger.Debug("connection_monitor", "No active direct connections", nil)
+	}
+
+	cm.mutex.Lock()
+	cm.healthChecks[component] = healthCheck
+	cm.mutex.Unlock()
 }
 
 // checkRouteHealth checks the health of active routes

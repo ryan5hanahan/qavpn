@@ -60,6 +60,12 @@ func main() {
 		if err := startIntegratedRelay(config); err != nil {
 			log.Fatalf("Failed to start relay: %v", err)
 		}
+	case "direct":
+		fmt.Printf("QAVPN v%d.%d.%d - Direct Connection Mode\n", VersionMajor, VersionMinor, VersionPatch)
+		directCLI := NewDirectCLIWithConfig(config)
+		if err := directCLI.HandleDirectCommand(os.Args[2:]); err != nil {
+			log.Fatalf("Direct mode error: %v", err)
+		}
 	case "status":
 		fmt.Printf("QAVPN v%d.%d.%d - Connection Status\n", VersionMajor, VersionMinor, VersionPatch)
 		showIntegratedStatus()
@@ -83,6 +89,7 @@ func printUsage() {
 	fmt.Println("Usage:")
 	fmt.Printf("  %s start   - Start VPN client\n", os.Args[0])
 	fmt.Printf("  %s relay   - Run as relay node\n", os.Args[0])
+	fmt.Printf("  %s direct  - Direct connection mode\n", os.Args[0])
 	fmt.Printf("  %s status  - Show connection status\n", os.Args[0])
 	fmt.Printf("  %s config  - Create default configuration file\n", os.Args[0])
 	fmt.Printf("  %s version - Show version information\n", os.Args[0])
@@ -106,6 +113,13 @@ func printDetailedHelp() {
 	fmt.Println("    -protocol <tcp|udp>  Transport protocol (default: tcp)")
 	fmt.Println("    -verbose         Enable verbose logging")
 	fmt.Println()
+	fmt.Println("  direct   Direct connection mode (peer-to-peer)")
+	fmt.Println("    listen           Start listener for direct connections")
+	fmt.Println("    connect <code>   Connect using invitation code")
+	fmt.Println("    invite           Generate invitation code")
+	fmt.Println("    status           Show direct connection status")
+	fmt.Println("    Use 'qavpn direct help' for detailed direct mode help")
+	fmt.Println()
 	fmt.Println("  status   Show connection status and statistics")
 	fmt.Println("  version  Show version information")
 	fmt.Println("  help     Show this help message")
@@ -117,6 +131,8 @@ func printDetailedHelp() {
 	fmt.Println("EXAMPLES:")
 	fmt.Printf("  %s start -hops 4 -protocol udp\n", os.Args[0])
 	fmt.Printf("  %s relay -port 9052\n", os.Args[0])
+	fmt.Printf("  %s direct listen -port 9053\n", os.Args[0])
+	fmt.Printf("  %s direct invite -address 192.168.1.100\n", os.Args[0])
 }
 
 // startClient initializes and starts the VPN client
@@ -300,7 +316,11 @@ func loadConfig() (*Config, error) {
 	
 	// Check if config file exists
 	if _, err := os.Stat(configPath); os.IsNotExist(err) {
-		return config, nil // Return default config if file doesn't exist
+		// Validate default config before returning
+		if err := ValidateConfig(config); err != nil {
+			return nil, fmt.Errorf("default configuration is invalid: %w", err)
+		}
+		return config, nil
 	}
 	
 	// Read config file
@@ -346,10 +366,76 @@ func loadConfig() (*Config, error) {
 			if level, err := strconv.Atoi(value); err == nil {
 				config.LogLevel = level
 			}
+		// Direct mode configuration
+		case "direct_mode_enabled":
+			if enabled, err := strconv.ParseBool(value); err == nil {
+				if config.DirectMode == nil {
+					config.DirectMode = &DirectModeConfig{}
+				}
+				config.DirectMode.Enabled = enabled
+			}
+		case "direct_mode_port":
+			if port, err := strconv.Atoi(value); err == nil {
+				if config.DirectMode == nil {
+					config.DirectMode = &DirectModeConfig{}
+				}
+				config.DirectMode.DefaultPort = port
+			}
+		case "direct_mode_protocol":
+			if value == "tcp" || value == "udp" {
+				if config.DirectMode == nil {
+					config.DirectMode = &DirectModeConfig{}
+				}
+				config.DirectMode.DefaultProtocol = value
+			}
+		case "direct_mode_max_connections":
+			if maxConn, err := strconv.Atoi(value); err == nil {
+				if config.DirectMode == nil {
+					config.DirectMode = &DirectModeConfig{}
+				}
+				config.DirectMode.MaxConnections = maxConn
+			}
+		case "direct_mode_connection_timeout":
+			if timeout, err := strconv.Atoi(value); err == nil {
+				if config.DirectMode == nil {
+					config.DirectMode = &DirectModeConfig{}
+				}
+				config.DirectMode.ConnectionTimeout = timeout
+			}
+		case "direct_mode_keepalive_interval":
+			if interval, err := strconv.Atoi(value); err == nil {
+				if config.DirectMode == nil {
+					config.DirectMode = &DirectModeConfig{}
+				}
+				config.DirectMode.KeepAliveInterval = interval
+			}
+		case "direct_mode_enable_opsec":
+			if opsec, err := strconv.ParseBool(value); err == nil {
+				if config.DirectMode == nil {
+					config.DirectMode = &DirectModeConfig{}
+				}
+				config.DirectMode.EnableOPSEC = opsec
+			}
+		case "direct_mode_config_path":
+			if config.DirectMode == nil {
+				config.DirectMode = &DirectModeConfig{}
+			}
+			config.DirectMode.ConfigPath = value
 		}
 	}
 	
-	return config, nil
+	// Migrate configuration if needed
+	migratedConfig, err := MigrateConfig(config)
+	if err != nil {
+		return nil, fmt.Errorf("configuration migration failed: %w", err)
+	}
+	
+	// Validate the final configuration
+	if err := ValidateConfig(migratedConfig); err != nil {
+		return nil, fmt.Errorf("configuration validation failed: %w", err)
+	}
+	
+	return migratedConfig, nil
 }
 
 // parseStartArgs parses command line arguments for start command
@@ -463,6 +549,16 @@ protocol=tcp
 # Relay configuration  
 relay_port=9051
 
+# Direct mode configuration
+direct_mode_enabled=false
+direct_mode_port=9052
+direct_mode_protocol=tcp
+direct_mode_max_connections=10
+direct_mode_connection_timeout=30
+direct_mode_keepalive_interval=60
+direct_mode_enable_opsec=true
+direct_mode_config_path=~/.qavpn/direct
+
 # Logging (0=quiet, 1=normal, 2=verbose)
 log_level=1
 `
@@ -574,13 +670,17 @@ func handleClientConnection(state *ClientState, clientConn net.Conn) {
 		fmt.Printf("New client connection from %s\n", clientConn.RemoteAddr())
 	}
 
-	// Establish tunnel through the active route
-	tunnel, err := establishTunnelThroughRoute(state, state.ActiveRoute)
+	// Use unified traffic routing to select best tunnel
+	tunnel, tunnelType, err := establishUnifiedTunnel(state, clientConn)
 	if err != nil {
 		fmt.Printf("Failed to establish tunnel: %v\n", err)
 		return
 	}
 	defer tunnel.Close()
+
+	if state.Config.LogLevel >= 2 {
+		fmt.Printf("Using %s tunnel for connection from %s\n", tunnelType, clientConn.RemoteAddr())
+	}
 
 	// Start bidirectional data forwarding
 	done := make(chan bool, 2)
@@ -596,8 +696,8 @@ func handleClientConnection(state *ClientState, clientConn net.Conn) {
 				return
 			}
 
-			// Add noise packets periodically
-			if shouldInjectNoise() {
+			// Add noise packets periodically (only for relay mode)
+			if tunnelType == "relay" && shouldInjectNoise() {
 				if err := injectNoisePacket(tunnel); err != nil {
 					fmt.Printf("Failed to inject noise: %v\n", err)
 				}
@@ -628,24 +728,68 @@ func handleClientConnection(state *ClientState, clientConn net.Conn) {
 				return
 			}
 
-			// Filter out noise packets (they should be indistinguishable, but for testing)
-			if !IsNoisePacket(data) {
-				if _, err := clientConn.Write(data); err != nil {
-					return
-				}
-
-				// Update statistics
-				state.mutex.Lock()
-				state.Statistics.BytesReceived += uint64(len(data))
-				state.Statistics.PacketsReceived++
-				state.Statistics.LastActivity = time.Now()
-				state.mutex.Unlock()
+			// Filter out noise packets (only relevant for relay mode)
+			if tunnelType == "relay" && IsNoisePacket(data) {
+				continue // Skip noise packets
 			}
+
+			if _, err := clientConn.Write(data); err != nil {
+				return
+			}
+
+			// Update statistics
+			state.mutex.Lock()
+			state.Statistics.BytesReceived += uint64(len(data))
+			state.Statistics.PacketsReceived++
+			state.Statistics.LastActivity = time.Now()
+			state.mutex.Unlock()
 		}
 	}()
 
 	// Wait for either direction to complete
 	<-done
+}
+
+// establishUnifiedTunnel creates the best available tunnel (direct or relay)
+func establishUnifiedTunnel(state *ClientState, clientConn net.Conn) (Tunnel, string, error) {
+	// Check if direct mode is enabled and we have active direct connections
+	if state.Config.DirectMode != nil && state.Config.DirectMode.Enabled {
+		if directTunnel, err := tryEstablishDirectTunnel(state, clientConn); err == nil {
+			return directTunnel, "direct", nil
+		} else if state.Config.LogLevel >= 2 {
+			fmt.Printf("Direct tunnel not available, falling back to relay: %v\n", err)
+		}
+	}
+
+	// Fall back to relay mode
+	relayTunnel, err := establishTunnelThroughRoute(state, state.ActiveRoute)
+	if err != nil {
+		return nil, "", fmt.Errorf("failed to establish relay tunnel: %w", err)
+	}
+
+	return relayTunnel, "relay", nil
+}
+
+// tryEstablishDirectTunnel attempts to create a direct tunnel
+func tryEstablishDirectTunnel(state *ClientState, clientConn net.Conn) (Tunnel, error) {
+	// Get the global direct connection integrator
+	integrator := GetGlobalDirectIntegrator()
+	if integrator == nil {
+		return nil, fmt.Errorf("direct connection integrator not initialized")
+	}
+
+	// Check if we have active direct connections
+	if !integrator.HasActiveDirectConnections() {
+		return nil, fmt.Errorf("no active direct connections available")
+	}
+
+	// Get the best available direct tunnel
+	directTunnel, err := integrator.GetBestDirectTunnel()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get direct tunnel: %w", err)
+	}
+
+	return directTunnel, nil
 }
 
 // establishTunnelThroughRoute creates a tunnel through the specified route

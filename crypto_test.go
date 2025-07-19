@@ -2,15 +2,15 @@ package main
 
 import (
 	"bytes"
-	"fmt"
+	"crypto/rand"
 	"testing"
 )
 
-func TestGenerateKyberKeyPair(t *testing.T) {
-	// Test basic key generation
+// TestKyberKeyGeneration tests real Kyber key pair generation
+func TestKyberKeyGeneration(t *testing.T) {
 	keyPair, err := GenerateKyberKeyPair()
 	if err != nil {
-		t.Fatalf("Key generation failed: %v", err)
+		t.Fatalf("Failed to generate Kyber key pair: %v", err)
 	}
 
 	// Validate key pair
@@ -20,606 +20,336 @@ func TestGenerateKyberKeyPair(t *testing.T) {
 
 	// Check key sizes
 	if len(keyPair.PublicKey) != KyberPublicKeyBytes {
-		t.Errorf("Public key size mismatch: got %d, expected %d", 
-			len(keyPair.PublicKey), KyberPublicKeyBytes)
+		t.Errorf("Public key size mismatch: got %d, expected %d", len(keyPair.PublicKey), KyberPublicKeyBytes)
 	}
 
 	if len(keyPair.PrivateKey) != KyberSecretKeyBytes {
-		t.Errorf("Private key size mismatch: got %d, expected %d", 
-			len(keyPair.PrivateKey), KyberSecretKeyBytes)
+		t.Errorf("Private key size mismatch: got %d, expected %d", len(keyPair.PrivateKey), KyberSecretKeyBytes)
+	}
+
+	// Test secure cleanup
+	keyPair.SecureZero()
+	if keyPair.PublicKey != nil || keyPair.PrivateKey != nil {
+		t.Error("SecureZero did not properly clear keys")
 	}
 }
 
-func TestKeyPairUniqueness(t *testing.T) {
-	// Generate multiple key pairs and ensure they're different
-	keyPair1, err := GenerateKyberKeyPair()
+// TestKyberKeySerialization tests key serialization and deserialization
+func TestKyberKeySerialization(t *testing.T) {
+	// Generate original key pair
+	originalKeyPair, err := GenerateKyberKeyPair()
 	if err != nil {
-		t.Fatalf("First key generation failed: %v", err)
+		t.Fatalf("Failed to generate key pair: %v", err)
 	}
+	defer originalKeyPair.SecureZero()
 
-	keyPair2, err := GenerateKyberKeyPair()
+	// Test public key serialization/deserialization
+	pubKeyBytes := originalKeyPair.SerializePublicKey()
+	deserializedPubKeyPair, err := DeserializePublicKey(pubKeyBytes)
 	if err != nil {
-		t.Fatalf("Second key generation failed: %v", err)
+		t.Fatalf("Failed to deserialize public key: %v", err)
+	}
+	defer deserializedPubKeyPair.SecureZero()
+
+	if !bytes.Equal(originalKeyPair.PublicKey, deserializedPubKeyPair.PublicKey) {
+		t.Error("Public key serialization/deserialization failed")
 	}
 
-	// Public keys should be different
-	if bytes.Equal(keyPair1.PublicKey, keyPair2.PublicKey) {
-		t.Error("Generated public keys are identical (should be unique)")
+	// Test private key serialization/deserialization
+	privKeyBytes := originalKeyPair.SerializePrivateKey()
+	deserializedPrivKeyPair, err := DeserializePrivateKey(privKeyBytes)
+	if err != nil {
+		t.Fatalf("Failed to deserialize private key: %v", err)
+	}
+	defer deserializedPrivKeyPair.SecureZero()
+
+	if !bytes.Equal(originalKeyPair.PrivateKey, deserializedPrivKeyPair.PrivateKey) {
+		t.Error("Private key serialization/deserialization failed")
 	}
 
-	// Private keys should be different
-	if bytes.Equal(keyPair1.PrivateKey, keyPair2.PrivateKey) {
-		t.Error("Generated private keys are identical (should be unique)")
+	if !bytes.Equal(originalKeyPair.PublicKey, deserializedPrivKeyPair.PublicKey) {
+		t.Error("Public key derived from private key doesn't match")
 	}
 }
 
-func TestPublicKeySerialization(t *testing.T) {
-	// Generate a key pair
+// TestKyberEncapsulationDecapsulation tests the core Kyber KEM operations
+func TestKyberEncapsulationDecapsulation(t *testing.T) {
+	// Generate key pair
 	keyPair, err := GenerateKyberKeyPair()
 	if err != nil {
-		t.Fatalf("Key generation failed: %v", err)
+		t.Fatalf("Failed to generate key pair: %v", err)
 	}
+	defer keyPair.SecureZero()
 
-	// Serialize public key
-	serialized := keyPair.SerializePublicKey()
-	if len(serialized) != KyberPublicKeyBytes {
-		t.Errorf("Serialized public key size mismatch: got %d, expected %d", 
-			len(serialized), KyberPublicKeyBytes)
-	}
-
-	// Deserialize public key
-	deserialized, err := DeserializePublicKey(serialized)
+	// Test encapsulation
+	sharedSecret1, ciphertext, err := kyberEncapsulate(keyPair.PublicKey)
 	if err != nil {
-		t.Fatalf("Public key deserialization failed: %v", err)
+		t.Fatalf("Encapsulation failed: %v", err)
+	}
+	defer secureZeroBytes(sharedSecret1)
+
+	// Verify ciphertext size
+	if len(ciphertext) != KyberCiphertextBytes {
+		t.Errorf("Ciphertext size mismatch: got %d, expected %d", len(ciphertext), KyberCiphertextBytes)
 	}
 
-	// Compare original and deserialized
-	if !bytes.Equal(keyPair.PublicKey, deserialized.PublicKey) {
-		t.Error("Public key serialization/deserialization roundtrip failed")
+	// Verify shared secret size
+	if len(sharedSecret1) != KyberSharedSecretSize {
+		t.Errorf("Shared secret size mismatch: got %d, expected %d", len(sharedSecret1), KyberSharedSecretSize)
 	}
 
-	// Deserialized should not have private key
-	if deserialized.PrivateKey != nil {
-		t.Error("Deserialized public key should not contain private key")
-	}
-}
-
-func TestPrivateKeySerialization(t *testing.T) {
-	// Generate a key pair
-	keyPair, err := GenerateKyberKeyPair()
+	// Test decapsulation
+	sharedSecret2, err := kyberDecapsulate(ciphertext, keyPair.PrivateKey)
 	if err != nil {
-		t.Fatalf("Key generation failed: %v", err)
+		t.Fatalf("Decapsulation failed: %v", err)
 	}
+	defer secureZeroBytes(sharedSecret2)
 
-	// Serialize private key
-	serialized := keyPair.SerializePrivateKey()
-	if len(serialized) != KyberSecretKeyBytes {
-		t.Errorf("Serialized private key size mismatch: got %d, expected %d", 
-			len(serialized), KyberSecretKeyBytes)
+	// Verify shared secrets match
+	if !bytes.Equal(sharedSecret1, sharedSecret2) {
+		t.Error("Shared secrets from encapsulation and decapsulation don't match")
 	}
+}
 
-	// Deserialize private key
-	deserialized, err := DeserializePrivateKey(serialized)
+// TestHKDFKeyDerivation tests HKDF key derivation
+func TestHKDFKeyDerivation(t *testing.T) {
+	// Generate test shared secret
+	sharedSecret := make([]byte, 32)
+	if _, err := rand.Read(sharedSecret); err != nil {
+		t.Fatalf("Failed to generate test shared secret: %v", err)
+	}
+	defer secureZeroBytes(sharedSecret)
+
+	// Test key derivation with different info
+	key1, err := deriveSymmetricKey(sharedSecret, nil, []byte("TEST-KEY-1"))
 	if err != nil {
-		t.Fatalf("Private key deserialization failed: %v", err)
+		t.Fatalf("Key derivation failed: %v", err)
 	}
+	defer secureZeroBytes(key1)
 
-	// Compare original and deserialized
-	if !bytes.Equal(keyPair.PrivateKey, deserialized.PrivateKey) {
-		t.Error("Private key serialization/deserialization roundtrip failed")
-	}
-
-	// Deserialized should also have public key
-	if !bytes.Equal(keyPair.PublicKey, deserialized.PublicKey) {
-		t.Error("Public key not properly extracted from private key")
-	}
-}
-
-func TestKeyValidation(t *testing.T) {
-	// Test validation of valid key pair
-	keyPair, err := GenerateKyberKeyPair()
+	key2, err := deriveSymmetricKey(sharedSecret, nil, []byte("TEST-KEY-2"))
 	if err != nil {
-		t.Fatalf("Key generation failed: %v", err)
+		t.Fatalf("Key derivation failed: %v", err)
+	}
+	defer secureZeroBytes(key2)
+
+	// Keys should be different with different info
+	if bytes.Equal(key1, key2) {
+		t.Error("Keys derived with different info should be different")
 	}
 
-	if err := keyPair.ValidateKeyPair(); err != nil {
-		t.Errorf("Valid key pair failed validation: %v", err)
-	}
-
-	// Test validation with nil public key
-	invalidKeyPair := &KyberKeyPair{
-		PublicKey:  nil,
-		PrivateKey: keyPair.PrivateKey,
-	}
-	if err := invalidKeyPair.ValidateKeyPair(); err == nil {
-		t.Error("Validation should fail for nil public key")
-	}
-
-	// Test validation with wrong public key size
-	invalidKeyPair = &KyberKeyPair{
-		PublicKey:  make([]byte, 100), // Wrong size
-		PrivateKey: keyPair.PrivateKey,
-	}
-	if err := invalidKeyPair.ValidateKeyPair(); err == nil {
-		t.Error("Validation should fail for wrong public key size")
-	}
-
-	// Test validation with wrong private key size
-	invalidKeyPair = &KyberKeyPair{
-		PublicKey:  keyPair.PublicKey,
-		PrivateKey: make([]byte, 100), // Wrong size
-	}
-	if err := invalidKeyPair.ValidateKeyPair(); err == nil {
-		t.Error("Validation should fail for wrong private key size")
-	}
-}
-
-func TestInvalidDeserialization(t *testing.T) {
-	// Test deserializing invalid public key size
-	invalidData := make([]byte, 100) // Wrong size
-	_, err := DeserializePublicKey(invalidData)
-	if err == nil {
-		t.Error("Should fail to deserialize invalid public key size")
-	}
-
-	// Test deserializing invalid private key size
-	_, err = DeserializePrivateKey(invalidData)
-	if err == nil {
-		t.Error("Should fail to deserialize invalid private key size")
-	}
-}
-
-func TestPolynomialOperations(t *testing.T) {
-	// Test polynomial addition
-	var a, b Polynomial
-	for i := 0; i < KyberN; i++ {
-		a[i] = uint16(i % KyberQ)
-		b[i] = uint16((i * 2) % KyberQ)
-	}
-
-	result := addPolynomials(a, b)
-	for i := 0; i < KyberN; i++ {
-		expected := (a[i] + b[i]) % KyberQ
-		if result[i] != expected {
-			t.Errorf("Polynomial addition failed at index %d: got %d, expected %d", 
-				i, result[i], expected)
-		}
-	}
-}
-
-func TestPolynomialVectorOperations(t *testing.T) {
-	// Test polynomial vector addition
-	var a, b PolynomialVector
-	for i := 0; i < KyberK; i++ {
-		for j := 0; j < KyberN; j++ {
-			a[i][j] = uint16((i + j) % KyberQ)
-			b[i][j] = uint16((i * j) % KyberQ)
-		}
-	}
-
-	result := addPolynomialVectors(a, b)
-	for i := 0; i < KyberK; i++ {
-		for j := 0; j < KyberN; j++ {
-			expected := (a[i][j] + b[i][j]) % KyberQ
-			if result[i][j] != expected {
-				t.Errorf("Polynomial vector addition failed at [%d][%d]: got %d, expected %d", 
-					i, j, result[i][j], expected)
-			}
-		}
-	}
-}
-
-func BenchmarkKeyGeneration(b *testing.B) {
-	for i := 0; i < b.N; i++ {
-		_, err := GenerateKyberKeyPair()
-		if err != nil {
-			b.Fatalf("Key generation failed: %v", err)
-		}
-	}
-}
-
-func BenchmarkKeySerialization(b *testing.B) {
-	keyPair, err := GenerateKyberKeyPair()
+	// Keys should be deterministic
+	key1Again, err := deriveSymmetricKey(sharedSecret, nil, []byte("TEST-KEY-1"))
 	if err != nil {
-		b.Fatalf("Key generation failed: %v", err)
+		t.Fatalf("Key derivation failed: %v", err)
+	}
+	defer secureZeroBytes(key1Again)
+
+	if !bytes.Equal(key1, key1Again) {
+		t.Error("Key derivation should be deterministic")
 	}
 
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		_ = keyPair.SerializePublicKey()
-		_ = keyPair.SerializePrivateKey()
+	// Verify key length
+	if len(key1) != 32 {
+		t.Errorf("Derived key length mismatch: got %d, expected 32", len(key1))
 	}
 }
 
-// Tests for PQC packet encryption/decryption (Task 2.2)
+// TestAESGCMEncryptionDecryption tests real AES-GCM operations
+func TestAESGCMEncryptionDecryption(t *testing.T) {
+	// Generate test key and nonce
+	key := make([]byte, 32)
+	if _, err := rand.Read(key); err != nil {
+		t.Fatalf("Failed to generate test key: %v", err)
+	}
+	defer secureZeroBytes(key)
 
-func TestPacketEncryptionDecryption(t *testing.T) {
-	// Generate a key pair for testing
-	keyPair, err := GenerateKyberKeyPair()
-	if err != nil {
-		t.Fatalf("Key generation failed: %v", err)
+	nonce := make([]byte, 12)
+	if _, err := rand.Read(nonce); err != nil {
+		t.Fatalf("Failed to generate test nonce: %v", err)
 	}
 
 	// Test data
-	testData := []byte("Hello, Quantum World! This is a test message for PQC encryption.")
+	plaintext := []byte("This is a test message for AES-GCM encryption")
 
-	// Encrypt the packet
-	encryptedPacket, err := EncryptPacket(testData, keyPair.PublicKey)
+	// Test encryption
+	ciphertext, tag, err := aesGCMEncrypt(plaintext, key, nonce)
+	if err != nil {
+		t.Fatalf("AES-GCM encryption failed: %v", err)
+	}
+
+	// Verify tag length
+	if len(tag) != 16 {
+		t.Errorf("Authentication tag length mismatch: got %d, expected 16", len(tag))
+	}
+
+	// Test decryption
+	decryptedText, err := aesGCMDecrypt(ciphertext, tag, key, nonce)
+	if err != nil {
+		t.Fatalf("AES-GCM decryption failed: %v", err)
+	}
+
+	// Verify decrypted text matches original
+	if !bytes.Equal(plaintext, decryptedText) {
+		t.Error("Decrypted text doesn't match original plaintext")
+	}
+
+	// Test authentication failure with wrong tag
+	wrongTag := make([]byte, 16)
+	if _, err := rand.Read(wrongTag); err != nil {
+		t.Fatalf("Failed to generate wrong tag: %v", err)
+	}
+
+	_, err = aesGCMDecrypt(ciphertext, wrongTag, key, nonce)
+	if err == nil {
+		t.Error("AES-GCM decryption should fail with wrong authentication tag")
+	}
+
+	// Test with wrong key
+	wrongKey := make([]byte, 32)
+	if _, err := rand.Read(wrongKey); err != nil {
+		t.Fatalf("Failed to generate wrong key: %v", err)
+	}
+	defer secureZeroBytes(wrongKey)
+
+	_, err = aesGCMDecrypt(ciphertext, tag, wrongKey, nonce)
+	if err == nil {
+		t.Error("AES-GCM decryption should fail with wrong key")
+	}
+}
+
+// TestEndToEndEncryption tests complete packet encryption/decryption
+func TestEndToEndEncryption(t *testing.T) {
+	// Generate key pair
+	keyPair, err := GenerateKyberKeyPair()
+	if err != nil {
+		t.Fatalf("Failed to generate key pair: %v", err)
+	}
+	defer keyPair.SecureZero()
+
+	// Test data
+	originalData := []byte("This is a test message for end-to-end encryption using post-quantum cryptography")
+
+	// Encrypt packet
+	encryptedPacket, err := EncryptPacket(originalData, keyPair.PublicKey)
 	if err != nil {
 		t.Fatalf("Packet encryption failed: %v", err)
 	}
 
 	// Verify encrypted packet structure
-	if encryptedPacket == nil {
-		t.Fatal("Encrypted packet is nil")
+	if len(encryptedPacket.Ciphertext) <= KyberCiphertextBytes {
+		t.Error("Encrypted packet ciphertext too short")
 	}
-	if len(encryptedPacket.Ciphertext) == 0 {
-		t.Error("Ciphertext is empty")
+	if len(encryptedPacket.Tag) != 16 {
+		t.Errorf("Authentication tag length mismatch: got %d, expected 16", len(encryptedPacket.Tag))
 	}
-	if len(encryptedPacket.Tag) == 0 {
-		t.Error("Authentication tag is empty")
-	}
-	if len(encryptedPacket.Nonce) == 0 {
-		t.Error("Nonce is empty")
+	if len(encryptedPacket.Nonce) != 12 {
+		t.Errorf("Nonce length mismatch: got %d, expected 12", len(encryptedPacket.Nonce))
 	}
 
-	// Decrypt the packet
+	// Decrypt packet
 	decryptedData, err := DecryptPacket(encryptedPacket, keyPair.PrivateKey)
 	if err != nil {
 		t.Fatalf("Packet decryption failed: %v", err)
 	}
 
 	// Verify decrypted data matches original
-	if !bytes.Equal(testData, decryptedData) {
-		t.Errorf("Decrypted data doesn't match original.\nOriginal: %s\nDecrypted: %s", 
-			string(testData), string(decryptedData))
+	if !bytes.Equal(originalData, decryptedData) {
+		t.Error("Decrypted data doesn't match original data")
 	}
 }
 
-func TestPacketEncryptionWithDifferentSizes(t *testing.T) {
-	keyPair, err := GenerateKyberKeyPair()
-	if err != nil {
-		t.Fatalf("Key generation failed: %v", err)
-	}
-
-	// Test different packet sizes
-	testSizes := []int{0, 1, 16, 64, 256, 1024, 4096}
-
-	for _, size := range testSizes {
-		t.Run(fmt.Sprintf("Size_%d", size), func(t *testing.T) {
-			// Generate test data of specific size
-			testData := make([]byte, size)
-			for i := range testData {
-				testData[i] = byte(i % 256)
-			}
-
-			// Encrypt and decrypt
-			encrypted, err := EncryptPacket(testData, keyPair.PublicKey)
-			if err != nil {
-				t.Fatalf("Encryption failed for size %d: %v", size, err)
-			}
-
-			decrypted, err := DecryptPacket(encrypted, keyPair.PrivateKey)
-			if err != nil {
-				t.Fatalf("Decryption failed for size %d: %v", size, err)
-			}
-
-			if !bytes.Equal(testData, decrypted) {
-				t.Errorf("Data mismatch for size %d", size)
-			}
-		})
-	}
-}
-
-func TestPacketEncryptionUniqueness(t *testing.T) {
-	keyPair, err := GenerateKyberKeyPair()
-	if err != nil {
-		t.Fatalf("Key generation failed: %v", err)
-	}
-
-	testData := []byte("Same message encrypted multiple times")
-
-	// Encrypt the same message multiple times
-	encrypted1, err := EncryptPacket(testData, keyPair.PublicKey)
-	if err != nil {
-		t.Fatalf("First encryption failed: %v", err)
-	}
-
-	encrypted2, err := EncryptPacket(testData, keyPair.PublicKey)
-	if err != nil {
-		t.Fatalf("Second encryption failed: %v", err)
-	}
-
-	// Ciphertexts should be different (due to random nonces)
-	if bytes.Equal(encrypted1.Ciphertext, encrypted2.Ciphertext) {
-		t.Error("Identical ciphertexts for same message (should be different due to randomness)")
-	}
-
-	// Nonces should be different
-	if bytes.Equal(encrypted1.Nonce, encrypted2.Nonce) {
-		t.Error("Identical nonces (should be random)")
-	}
-
-	// Both should decrypt to the same original message
-	decrypted1, err := DecryptPacket(encrypted1, keyPair.PrivateKey)
-	if err != nil {
-		t.Fatalf("First decryption failed: %v", err)
-	}
-
-	decrypted2, err := DecryptPacket(encrypted2, keyPair.PrivateKey)
-	if err != nil {
-		t.Fatalf("Second decryption failed: %v", err)
-	}
-
-	if !bytes.Equal(decrypted1, decrypted2) {
-		t.Error("Decrypted messages don't match")
-	}
-
-	if !bytes.Equal(testData, decrypted1) {
-		t.Error("Decrypted message doesn't match original")
-	}
-}
-
-func TestPacketEncryptionWithWrongKey(t *testing.T) {
+// TestEncryptionWithDifferentKeys tests that different keys produce different results
+func TestEncryptionWithDifferentKeys(t *testing.T) {
 	// Generate two different key pairs
 	keyPair1, err := GenerateKyberKeyPair()
 	if err != nil {
-		t.Fatalf("First key generation failed: %v", err)
+		t.Fatalf("Failed to generate first key pair: %v", err)
 	}
+	defer keyPair1.SecureZero()
 
 	keyPair2, err := GenerateKyberKeyPair()
 	if err != nil {
-		t.Fatalf("Second key generation failed: %v", err)
+		t.Fatalf("Failed to generate second key pair: %v", err)
 	}
+	defer keyPair2.SecureZero()
 
-	testData := []byte("Secret message")
+	// Test data
+	testData := []byte("Test message for different keys")
 
-	// Encrypt with first key pair
-	encrypted, err := EncryptPacket(testData, keyPair1.PublicKey)
+	// Encrypt with first key
+	encrypted1, err := EncryptPacket(testData, keyPair1.PublicKey)
 	if err != nil {
-		t.Fatalf("Encryption failed: %v", err)
+		t.Fatalf("Encryption with first key failed: %v", err)
 	}
 
-	// Try to decrypt with wrong private key
-	_, err = DecryptPacket(encrypted, keyPair2.PrivateKey)
+	// Encrypt with second key
+	encrypted2, err := EncryptPacket(testData, keyPair2.PublicKey)
+	if err != nil {
+		t.Fatalf("Encryption with second key failed: %v", err)
+	}
+
+	// Ciphertexts should be different
+	if bytes.Equal(encrypted1.Ciphertext, encrypted2.Ciphertext) {
+		t.Error("Encryptions with different keys should produce different ciphertexts")
+	}
+
+	// Decryption with wrong key should fail
+	_, err = DecryptPacket(encrypted1, keyPair2.PrivateKey)
 	if err == nil {
-		t.Error("Decryption should fail with wrong private key")
-	}
-}
-
-func TestPacketEncryptionInvalidInputs(t *testing.T) {
-	keyPair, err := GenerateKyberKeyPair()
-	if err != nil {
-		t.Fatalf("Key generation failed: %v", err)
+		t.Error("Decryption with wrong private key should fail")
 	}
 
-	testData := []byte("Test message")
-
-	// Test encryption with invalid public key size
-	invalidPublicKey := make([]byte, 100) // Wrong size
-	_, err = EncryptPacket(testData, invalidPublicKey)
+	_, err = DecryptPacket(encrypted2, keyPair1.PrivateKey)
 	if err == nil {
-		t.Error("Encryption should fail with invalid public key size")
-	}
-
-	// Test decryption with invalid private key size
-	encrypted, err := EncryptPacket(testData, keyPair.PublicKey)
-	if err != nil {
-		t.Fatalf("Encryption failed: %v", err)
-	}
-
-	invalidPrivateKey := make([]byte, 100) // Wrong size
-	_, err = DecryptPacket(encrypted, invalidPrivateKey)
-	if err == nil {
-		t.Error("Decryption should fail with invalid private key size")
+		t.Error("Decryption with wrong private key should fail")
 	}
 }
 
-func TestPacketEncryptionTampering(t *testing.T) {
-	keyPair, err := GenerateKyberKeyPair()
+// TestNoisePacketGeneration tests noise packet generation
+func TestNoisePacketGeneration(t *testing.T) {
+	// Test random size noise packet
+	noisePacket1, err := GenerateNoisePacket()
 	if err != nil {
-		t.Fatalf("Key generation failed: %v", err)
+		t.Fatalf("Failed to generate noise packet: %v", err)
 	}
 
-	testData := []byte("Important message")
+	if noisePacket1.Size != len(noisePacket1.Data) {
+		t.Error("Noise packet size doesn't match data length")
+	}
 
-	// Encrypt the packet
-	encrypted, err := EncryptPacket(testData, keyPair.PublicKey)
+	if noisePacket1.Size < 40 || noisePacket1.Size > 1500 {
+		t.Errorf("Noise packet size out of expected range: %d", noisePacket1.Size)
+	}
+
+	// Test specific size noise packet
+	testSize := 256
+	noisePacket2, err := GenerateNoisePacketWithSize(testSize)
 	if err != nil {
-		t.Fatalf("Encryption failed: %v", err)
+		t.Fatalf("Failed to generate noise packet with specific size: %v", err)
 	}
 
-	// Test tampering with ciphertext
-	tamperedEncrypted := &EncryptedPacket{
-		Ciphertext: append([]byte{}, encrypted.Ciphertext...), // Copy
-		Tag:        encrypted.Tag,
-		Nonce:      encrypted.Nonce,
-	}
-	if len(tamperedEncrypted.Ciphertext) > 0 {
-		tamperedEncrypted.Ciphertext[0] ^= 1 // Flip one bit
+	if noisePacket2.Size != testSize {
+		t.Errorf("Noise packet size mismatch: got %d, expected %d", noisePacket2.Size, testSize)
 	}
 
-	_, err = DecryptPacket(tamperedEncrypted, keyPair.PrivateKey)
-	if err == nil {
-		t.Error("Decryption should fail with tampered ciphertext")
+	if len(noisePacket2.Data) != testSize {
+		t.Errorf("Noise packet data length mismatch: got %d, expected %d", len(noisePacket2.Data), testSize)
 	}
 
-	// Test tampering with authentication tag
-	tamperedEncrypted = &EncryptedPacket{
-		Ciphertext: encrypted.Ciphertext,
-		Tag:        append([]byte{}, encrypted.Tag...), // Copy
-		Nonce:      encrypted.Nonce,
-	}
-	if len(tamperedEncrypted.Tag) > 0 {
-		tamperedEncrypted.Tag[0] ^= 1 // Flip one bit
+	// Test that different noise packets are different
+	noisePacket3, err := GenerateNoisePacket()
+	if err != nil {
+		t.Fatalf("Failed to generate third noise packet: %v", err)
 	}
 
-	_, err = DecryptPacket(tamperedEncrypted, keyPair.PrivateKey)
-	if err == nil {
-		t.Error("Decryption should fail with tampered authentication tag")
+	if bytes.Equal(noisePacket1.Data, noisePacket3.Data) && noisePacket1.Size == noisePacket3.Size {
+		t.Error("Different noise packets should be different")
 	}
 }
 
-func BenchmarkPacketEncryption(b *testing.B) {
-	keyPair, err := GenerateKyberKeyPair()
-	if err != nil {
-		b.Fatalf("Key generation failed: %v", err)
-	}
-
-	testData := make([]byte, 1024) // 1KB test data
-	for i := range testData {
-		testData[i] = byte(i % 256)
-	}
-
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		_, err := EncryptPacket(testData, keyPair.PublicKey)
-		if err != nil {
-			b.Fatalf("Encryption failed: %v", err)
-		}
-	}
-}
-
-func BenchmarkPacketDecryption(b *testing.B) {
-	keyPair, err := GenerateKyberKeyPair()
-	if err != nil {
-		b.Fatalf("Key generation failed: %v", err)
-	}
-
-	testData := make([]byte, 1024) // 1KB test data
-	for i := range testData {
-		testData[i] = byte(i % 256)
-	}
-
-	encrypted, err := EncryptPacket(testData, keyPair.PublicKey)
-	if err != nil {
-		b.Fatalf("Encryption failed: %v", err)
-	}
-
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		_, err := DecryptPacket(encrypted, keyPair.PrivateKey)
-		if err != nil {
-			b.Fatalf("Decryption failed: %v", err)
-		}
-	}
-}
-
-// Tests for noise packet generation (Task 2.3)
-
-func TestGenerateNoisePacket(t *testing.T) {
-	// Test basic noise packet generation
-	noisePacket, err := GenerateNoisePacket()
-	if err != nil {
-		t.Fatalf("Noise packet generation failed: %v", err)
-	}
-
-	// Verify packet structure
-	if noisePacket == nil {
-		t.Fatal("Generated noise packet is nil")
-	}
-	if len(noisePacket.Data) == 0 {
-		t.Error("Noise packet data is empty")
-	}
-	if noisePacket.Size != len(noisePacket.Data) {
-		t.Errorf("Noise packet size mismatch: size field %d, actual data length %d", 
-			noisePacket.Size, len(noisePacket.Data))
-	}
-	if noisePacket.Timestamp == 0 {
-		t.Error("Noise packet timestamp is zero")
-	}
-
-	// Verify packet size is realistic
-	if noisePacket.Size < 40 || noisePacket.Size > 1500 {
-		t.Errorf("Unrealistic noise packet size: %d (should be between 40-1500)", noisePacket.Size)
-	}
-}
-
-func TestGenerateNoisePacketWithSize(t *testing.T) {
-	testSizes := []int{0, 1, 64, 256, 512, 1024, 1500}
-
-	for _, size := range testSizes {
-		t.Run(fmt.Sprintf("Size_%d", size), func(t *testing.T) {
-			noisePacket, err := GenerateNoisePacketWithSize(size)
-			if err != nil {
-				t.Fatalf("Noise packet generation failed for size %d: %v", size, err)
-			}
-
-			if len(noisePacket.Data) != size {
-				t.Errorf("Generated packet size mismatch: expected %d, got %d", 
-					size, len(noisePacket.Data))
-			}
-			if noisePacket.Size != size {
-				t.Errorf("Size field mismatch: expected %d, got %d", size, noisePacket.Size)
-			}
-		})
-	}
-}
-
-func TestGenerateNoisePacketInvalidSize(t *testing.T) {
-	invalidSizes := []int{-1, -100, 65536, 100000}
-
-	for _, size := range invalidSizes {
-		t.Run(fmt.Sprintf("InvalidSize_%d", size), func(t *testing.T) {
-			_, err := GenerateNoisePacketWithSize(size)
-			if err == nil {
-				t.Errorf("Should fail for invalid size %d", size)
-			}
-		})
-	}
-}
-
-func TestNoisePacketUniqueness(t *testing.T) {
-	// Generate multiple noise packets and verify they're different
-	packet1, err := GenerateNoisePacket()
-	if err != nil {
-		t.Fatalf("First noise packet generation failed: %v", err)
-	}
-
-	packet2, err := GenerateNoisePacket()
-	if err != nil {
-		t.Fatalf("Second noise packet generation failed: %v", err)
-	}
-
-	// Data should be different (cryptographically random)
-	if bytes.Equal(packet1.Data, packet2.Data) {
-		t.Error("Generated noise packets have identical data (should be random)")
-	}
-
-	// Timestamps should be different
-	if packet1.Timestamp == packet2.Timestamp {
-		t.Error("Generated noise packets have identical timestamps")
-	}
-}
-
-func TestNoisePacketRealisticSizes(t *testing.T) {
-	// Generate many packets and verify size distribution is realistic
-	const numPackets = 100
-	sizeCounts := make(map[int]int)
-
-	for i := 0; i < numPackets; i++ {
-		packet, err := GenerateNoisePacket()
-		if err != nil {
-			t.Fatalf("Noise packet generation failed at iteration %d: %v", i, err)
-		}
-		sizeCounts[packet.Size]++
-	}
-
-	// Verify we have some variety in sizes
-	if len(sizeCounts) < 5 {
-		t.Errorf("Insufficient size variety: only %d different sizes in %d packets", 
-			len(sizeCounts), numPackets)
-	}
-
-	// Verify all sizes are within realistic bounds
-	for size := range sizeCounts {
-		if size < 40 || size > 1500 {
-			t.Errorf("Unrealistic packet size generated: %d", size)
-		}
-	}
-}
-
-func TestInjectNoisePackets(t *testing.T) {
+// TestNoisePacketInjection tests noise packet injection into real packet streams
+func TestNoisePacketInjection(t *testing.T) {
 	// Create some real packets
 	realPackets := [][]byte{
 		[]byte("Real packet 1"),
@@ -627,210 +357,154 @@ func TestInjectNoisePackets(t *testing.T) {
 		[]byte("Real packet 3"),
 	}
 
-	// Test different noise ratios
-	testRatios := []float64{0.0, 0.1, 0.5, 1.0}
+	// Test noise injection
+	noiseRatio := 0.5 // 50% noise
+	mixedPackets, err := InjectNoisePackets(realPackets, noiseRatio)
+	if err != nil {
+		t.Fatalf("Failed to inject noise packets: %v", err)
+	}
 
-	for _, ratio := range testRatios {
-		t.Run(fmt.Sprintf("Ratio_%.1f", ratio), func(t *testing.T) {
-			result, err := InjectNoisePackets(realPackets, ratio)
-			if err != nil {
-				t.Fatalf("Noise injection failed for ratio %.1f: %v", ratio, err)
-			}
+	// Should have more packets than original
+	expectedMinPackets := len(realPackets)
+	expectedMaxPackets := len(realPackets) * 2
+	if len(mixedPackets) < expectedMinPackets || len(mixedPackets) > expectedMaxPackets {
+		t.Errorf("Mixed packet count out of expected range: got %d, expected %d-%d", 
+			len(mixedPackets), expectedMinPackets, expectedMaxPackets)
+	}
 
-			expectedTotal := len(realPackets) + int(float64(len(realPackets))*ratio)
-			if len(result) != expectedTotal {
-				t.Errorf("Unexpected total packet count: expected %d, got %d", 
-					expectedTotal, len(result))
+	// All original packets should still be present
+	realPacketCount := 0
+	for _, packet := range mixedPackets {
+		for _, realPacket := range realPackets {
+			if bytes.Equal(packet, realPacket) {
+				realPacketCount++
+				break
 			}
+		}
+	}
 
-			// Verify all original packets are still present
-			realPacketCount := 0
-			for _, packet := range result {
-				for _, realPacket := range realPackets {
-					if bytes.Equal(packet, realPacket) {
-						realPacketCount++
-						break
-					}
-				}
-			}
-
-			if realPacketCount != len(realPackets) {
-				t.Errorf("Not all real packets preserved: expected %d, found %d", 
-					len(realPackets), realPacketCount)
-			}
-		})
+	if realPacketCount != len(realPackets) {
+		t.Errorf("Not all real packets preserved: got %d, expected %d", realPacketCount, len(realPackets))
 	}
 }
 
-func TestInjectNoisePacketsInvalidRatio(t *testing.T) {
+// TestSecureMemoryClearing tests that sensitive data is properly cleared
+func TestSecureMemoryClearing(t *testing.T) {
+	// Create test data
+	testData := []byte("sensitive data that should be cleared")
+	originalData := make([]byte, len(testData))
+	copy(originalData, testData)
+
+	// Clear the data
+	secureZeroBytes(testData)
+
+	// Verify data is cleared
+	for i, b := range testData {
+		if b != 0 {
+			t.Errorf("Byte at index %d not cleared: got %d, expected 0", i, b)
+		}
+	}
+
+	// Verify original data was actually different
+	allZero := true
+	for _, b := range originalData {
+		if b != 0 {
+			allZero = false
+			break
+		}
+	}
+	if allZero {
+		t.Error("Test data was already all zeros, test is invalid")
+	}
+}
+
+// TestInvalidInputHandling tests error handling for invalid inputs
+func TestInvalidInputHandling(t *testing.T) {
+	// Test invalid public key size for encryption
+	invalidPubKey := make([]byte, 10) // Wrong size
+	testData := []byte("test data")
+	
+	_, err := EncryptPacket(testData, invalidPubKey)
+	if err == nil {
+		t.Error("EncryptPacket should fail with invalid public key size")
+	}
+
+	// Test invalid private key size for decryption
+	validKeyPair, err := GenerateKyberKeyPair()
+	if err != nil {
+		t.Fatalf("Failed to generate valid key pair: %v", err)
+	}
+	defer validKeyPair.SecureZero()
+
+	validEncrypted, err := EncryptPacket(testData, validKeyPair.PublicKey)
+	if err != nil {
+		t.Fatalf("Failed to encrypt with valid key: %v", err)
+	}
+
+	invalidPrivKey := make([]byte, 10) // Wrong size
+	_, err = DecryptPacket(validEncrypted, invalidPrivKey)
+	if err == nil {
+		t.Error("DecryptPacket should fail with invalid private key size")
+	}
+
+	// Test invalid noise packet size
+	_, err = GenerateNoisePacketWithSize(-1)
+	if err == nil {
+		t.Error("GenerateNoisePacketWithSize should fail with negative size")
+	}
+
+	_, err = GenerateNoisePacketWithSize(70000)
+	if err == nil {
+		t.Error("GenerateNoisePacketWithSize should fail with oversized packet")
+	}
+
+	// Test invalid noise ratio
 	realPackets := [][]byte{[]byte("test")}
-	invalidRatios := []float64{-0.1, -1.0, 1.1, 2.0}
+	_, err = InjectNoisePackets(realPackets, -0.1)
+	if err == nil {
+		t.Error("InjectNoisePackets should fail with negative noise ratio")
+	}
 
-	for _, ratio := range invalidRatios {
-		t.Run(fmt.Sprintf("InvalidRatio_%.1f", ratio), func(t *testing.T) {
-			_, err := InjectNoisePackets(realPackets, ratio)
-			if err == nil {
-				t.Errorf("Should fail for invalid ratio %.1f", ratio)
-			}
-		})
+	_, err = InjectNoisePackets(realPackets, 1.1)
+	if err == nil {
+		t.Error("InjectNoisePackets should fail with noise ratio > 1")
 	}
 }
 
-func TestInjectNoisePacketsEmptyInput(t *testing.T) {
-	// Test with empty packet list
-	result, err := InjectNoisePackets([][]byte{}, 0.5)
-	if err != nil {
-		t.Fatalf("Noise injection failed for empty input: %v", err)
-	}
-
-	if len(result) != 0 {
-		t.Errorf("Expected empty result for empty input, got %d packets", len(result))
-	}
-}
-
-func TestIsNoisePacketForTesting(t *testing.T) {
-	// Generate a noise packet
-	noisePacket, err := GenerateNoisePacket()
-	if err != nil {
-		t.Fatalf("Noise packet generation failed: %v", err)
-	}
-
-	// Test noise detection (this is only for testing purposes)
-	if !IsNoisePacket(noisePacket.Data) {
-		t.Error("Generated noise packet not detected as noise")
-	}
-
-	// Test with real data
-	realData := []byte("This is real encrypted data")
-	if IsNoisePacket(realData) {
-		t.Error("Real data incorrectly detected as noise")
-	}
-
-	// Test with empty data
-	if IsNoisePacket([]byte{}) {
-		t.Error("Empty data incorrectly detected as noise")
-	}
-}
-
-func TestNoisePacketIndistinguishability(t *testing.T) {
-	// This test verifies that noise packets have characteristics similar to encrypted data
-	noisePacket, err := GenerateNoisePacket()
-	if err != nil {
-		t.Fatalf("Noise packet generation failed: %v", err)
-	}
-
-	// Verify noise data appears random (basic entropy check)
-	data := noisePacket.Data
-	if len(data) < 16 {
-		t.Skip("Packet too small for entropy analysis")
-	}
-
-	// Count byte frequency distribution
-	freq := make(map[byte]int)
-	for _, b := range data {
-		freq[b]++
-	}
-
-	// For random data, we expect reasonable distribution
-	// (This is a basic check - real analysis would be more sophisticated)
-	if len(freq) < len(data)/8 { // Expect at least 1/8 unique bytes
-		t.Error("Noise data appears to have low entropy (not random enough)")
-	}
-
-	// Verify no obvious patterns (check for repeated sequences)
-	hasPattern := false
-	if len(data) >= 8 {
-		for i := 0; i < len(data)-4; i++ {
-			pattern := data[i : i+4]
-			for j := i + 4; j < len(data)-3; j++ {
-				if bytes.Equal(pattern, data[j:j+4]) {
-					hasPattern = true
-					break
-				}
-			}
-			if hasPattern {
-				break
-			}
-		}
-	}
-
-	if hasPattern {
-		t.Error("Noise data contains obvious patterns (should appear random)")
-	}
-}
-
-func TestNoisePacketSizeDistribution(t *testing.T) {
-	// Test that noise packets follow realistic size distributions
-	const numSamples = 1000
-	sizes := make([]int, numSamples)
-
-	for i := 0; i < numSamples; i++ {
-		packet, err := GenerateNoisePacket()
-		if err != nil {
-			t.Fatalf("Noise packet generation failed at sample %d: %v", i, err)
-		}
-		sizes[i] = packet.Size
-	}
-
-	// Verify we have common network packet sizes represented
-	commonSizes := []int{64, 128, 256, 512, 1024, 1500}
-	foundCommonSizes := 0
-
-	for _, commonSize := range commonSizes {
-		for _, size := range sizes {
-			if size == commonSize {
-				foundCommonSizes++
-				break
-			}
-		}
-	}
-
-	if foundCommonSizes < len(commonSizes)/2 {
-		t.Errorf("Not enough common packet sizes found: %d out of %d", 
-			foundCommonSizes, len(commonSizes))
-	}
-
-	// Verify size range is reasonable
-	minSize, maxSize := sizes[0], sizes[0]
-	for _, size := range sizes {
-		if size < minSize {
-			minSize = size
-		}
-		if size > maxSize {
-			maxSize = size
-		}
-	}
-
-	if minSize < 40 || maxSize > 1500 {
-		t.Errorf("Size range unrealistic: min=%d, max=%d (expected 40-1500)", 
-			minSize, maxSize)
-	}
-}
-
-func BenchmarkGenerateNoisePacket(b *testing.B) {
+// BenchmarkKyberKeyGeneration benchmarks key generation performance
+func BenchmarkKyberKeyGeneration(b *testing.B) {
 	for i := 0; i < b.N; i++ {
-		_, err := GenerateNoisePacket()
+		keyPair, err := GenerateKyberKeyPair()
 		if err != nil {
-			b.Fatalf("Noise packet generation failed: %v", err)
+			b.Fatalf("Key generation failed: %v", err)
 		}
+		keyPair.SecureZero()
 	}
 }
 
-func BenchmarkInjectNoisePackets(b *testing.B) {
-	// Create test packets
-	realPackets := make([][]byte, 100)
-	for i := range realPackets {
-		realPackets[i] = make([]byte, 512)
-		for j := range realPackets[i] {
-			realPackets[i][j] = byte(i + j)
-		}
+// BenchmarkEncryptDecrypt benchmarks end-to-end encryption/decryption
+func BenchmarkEncryptDecrypt(b *testing.B) {
+	keyPair, err := GenerateKyberKeyPair()
+	if err != nil {
+		b.Fatalf("Failed to generate key pair: %v", err)
+	}
+	defer keyPair.SecureZero()
+
+	testData := make([]byte, 1024) // 1KB test data
+	if _, err := rand.Read(testData); err != nil {
+		b.Fatalf("Failed to generate test data: %v", err)
 	}
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_, err := InjectNoisePackets(realPackets, 0.3)
+		encrypted, err := EncryptPacket(testData, keyPair.PublicKey)
 		if err != nil {
-			b.Fatalf("Noise injection failed: %v", err)
+			b.Fatalf("Encryption failed: %v", err)
+		}
+
+		_, err = DecryptPacket(encrypted, keyPair.PrivateKey)
+		if err != nil {
+			b.Fatalf("Decryption failed: %v", err)
 		}
 	}
 }

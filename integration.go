@@ -13,6 +13,7 @@ type SystemIntegration struct {
 	config            *Config
 	nodeManager       *NodeManager
 	tunnelManager     *TunnelManager
+	directManager     *DirectCLI
 	errorHandler      *SecureErrorHandler
 	recoveryManager   *AutomaticRecoveryManager
 	logger            *SecureLogger
@@ -80,7 +81,20 @@ func (si *SystemIntegration) initializeComponents() error {
 	si.healthChecker = NewSystemHealthChecker(si.logger, si.nodeManager, si.tunnelManager, si.errorHandler)
 	si.logger.Info("system_integration", "System health checker initialized", nil)
 
-	// 8. Initialize security hardener
+	// 8. Initialize direct mode integration (if enabled)
+	if si.config.DirectMode != nil && si.config.DirectMode.Enabled {
+		if err := InitializeDirectIntegration(si.config); err != nil {
+			return fmt.Errorf("failed to initialize direct integration: %w", err)
+		}
+		
+		si.directManager = NewDirectCLIWithConfig(si.config)
+		si.logger.Info("system_integration", "Direct mode integration initialized", map[string]interface{}{
+			"port":     si.config.DirectMode.DefaultPort,
+			"protocol": si.config.DirectMode.DefaultProtocol,
+		})
+	}
+
+	// 9. Initialize security hardener
 	si.securityHardener = NewSecurityHardener(si.logger, si.errorHandler)
 	si.logger.Info("system_integration", "Security hardener initialized", nil)
 
@@ -167,6 +181,15 @@ func (si *SystemIntegration) StopSystem() error {
 	if si.nodeManager != nil {
 		if err := si.nodeManager.StopRelayServer(); err != nil {
 			si.logger.Error("system_integration", "Error stopping relay server", map[string]interface{}{
+				"error": err.Error(),
+			})
+		}
+	}
+
+	// Shutdown direct integration if enabled
+	if si.config.DirectMode != nil && si.config.DirectMode.Enabled {
+		if err := ShutdownDirectIntegration(); err != nil {
+			si.logger.Error("system_integration", "Error shutting down direct integration", map[string]interface{}{
 				"error": err.Error(),
 			})
 		}

@@ -227,8 +227,13 @@ func performUDPKeyExchange(conn *net.UDPConn, localKeyPair *KyberKeyPair, sessio
 		return nil, fmt.Errorf("failed to decapsulate remote secret: %w", err)
 	}
 
-	// Combine both shared secrets for final key derivation
-	finalSecret := combineSharedSecrets(sharedSecret, remoteSharedSecret)
+	// Combine both shared secrets for final key derivation using secure HKDF
+	contextInfo := []byte("UDP-KEY-EXCHANGE")
+	finalSecret, err := SecureCombineSharedSecrets(sharedSecret, remoteSharedSecret, contextInfo)
+	if err != nil {
+		return nil, fmt.Errorf("failed to combine shared secrets: %w", err)
+	}
+	defer secureZeroBytes(finalSecret)
 
 	return &CryptoContext{
 		LocalKeyPair:    KeyPair{PublicKey: localKeyPair.PublicKey, PrivateKey: localKeyPair.PrivateKey},
@@ -287,64 +292,60 @@ func receiveUDPKeyExchangeMessage(conn *net.UDPConn) ([]byte, error) {
 	return data, nil
 }
 
-// performKeyExchange conducts PQC key exchange over the TCP connection
+// performKeyExchange conducts authenticated PQC key exchange over the TCP connection
+// This function now requires authentication context to prevent MITM attacks
 func performKeyExchange(conn net.Conn, localKeyPair *KyberKeyPair) (*CryptoContext, error) {
-	// Set timeout for key exchange
-	if err := conn.SetDeadline(time.Now().Add(30 * time.Second)); err != nil {
-		return nil, fmt.Errorf("failed to set connection deadline: %w", err)
+	// Create default authentication context for backward compatibility
+	authCtx := &AuthenticationContext{
+		Method:    "pqc-mutual-auth",
+		Timestamp: time.Now(),
+		Nonce:     make([]byte, 32),
 	}
-	defer conn.SetDeadline(time.Time{}) // Clear deadline after key exchange
+	
+	// Generate secure nonce
+	if _, err := rand.Read(authCtx.Nonce); err != nil {
+		return nil, fmt.Errorf("failed to generate authentication nonce: %w", err)
+	}
+	
+	// Use authenticated key exchange with context
+	return performAuthenticatedKeyExchangeWithContext(conn, localKeyPair, authCtx)
+}
 
-	// Send our public key to remote peer
-	publicKeyData := localKeyPair.SerializePublicKey()
-	if err := sendKeyExchangeMessage(conn, publicKeyData); err != nil {
-		return nil, fmt.Errorf("failed to send public key: %w", err)
+// performAuthenticatedKeyExchangeWithContext performs authenticated key exchange
+func performAuthenticatedKeyExchangeWithContext(conn net.Conn, localKeyPair *KyberKeyPair, authCtx *AuthenticationContext) (*CryptoContext, error) {
+	if authCtx == nil {
+		return nil, errors.New("authentication context is required")
 	}
 
-	// Receive remote peer's public key
-	remotePublicKey, err := receiveKeyExchangeMessage(conn)
+	// Use the new authenticated key exchange
+	result, err := PerformAuthenticatedKeyExchange(conn, localKeyPair, authCtx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to receive remote public key: %w", err)
+		return nil, fmt.Errorf("authenticated key exchange failed: %w", err)
 	}
 
-	// Validate remote public key
-	if len(remotePublicKey) != KyberPublicKeyBytes {
-		return nil, fmt.Errorf("invalid remote public key size: got %d, expected %d", 
-			len(remotePublicKey), KyberPublicKeyBytes)
+	if !result.Success {
+		return nil, fmt.Errorf("authentication failed: %s", result.Error)
 	}
 
-	// Generate shared secret using Kyber encapsulation
-	sharedSecret, ciphertext, err := kyberEncapsulate(remotePublicKey)
+	return result.CryptoContext, nil
+}
+
+// performPSKKeyExchangeWithAuth performs PSK-authenticated key exchange
+func performPSKKeyExchangeWithAuth(conn net.Conn, localKeyPair *KyberKeyPair, psk *PSKAuthenticator, peerID string) (*CryptoContext, error) {
+	if psk == nil {
+		return nil, errors.New("PSK authenticator is required")
+	}
+
+	result, err := psk.AuthenticateWithPSK(conn, peerID, localKeyPair)
 	if err != nil {
-		return nil, fmt.Errorf("failed to generate shared secret: %w", err)
+		return nil, fmt.Errorf("PSK authentication failed: %w", err)
 	}
 
-	// Send encapsulated secret to remote peer
-	if err := sendKeyExchangeMessage(conn, ciphertext); err != nil {
-		return nil, fmt.Errorf("failed to send encapsulated secret: %w", err)
+	if !result.Success {
+		return nil, fmt.Errorf("PSK authentication failed: %s", result.Error)
 	}
 
-	// Receive remote peer's encapsulated secret
-	remoteCiphertext, err := receiveKeyExchangeMessage(conn)
-	if err != nil {
-		return nil, fmt.Errorf("failed to receive remote encapsulated secret: %w", err)
-	}
-
-	// Decapsulate remote secret
-	remoteSharedSecret, err := kyberDecapsulate(remoteCiphertext, localKeyPair.SerializePrivateKey())
-	if err != nil {
-		return nil, fmt.Errorf("failed to decapsulate remote secret: %w", err)
-	}
-
-	// Combine both shared secrets for final key derivation
-	finalSecret := combineSharedSecrets(sharedSecret, remoteSharedSecret)
-
-	return &CryptoContext{
-		LocalKeyPair:    KeyPair{PublicKey: localKeyPair.PublicKey, PrivateKey: localKeyPair.PrivateKey},
-		RemotePublicKey: remotePublicKey,
-		SharedSecret:    finalSecret,
-		CreatedAt:       time.Now(),
-	}, nil
+	return result.CryptoContext, nil
 }
 
 // sendKeyExchangeMessage sends a message during key exchange
@@ -398,17 +399,6 @@ func receiveKeyExchangeMessage(conn net.Conn) ([]byte, error) {
 	return data, nil
 }
 
-// combineSharedSecrets combines two shared secrets into a final key
-func combineSharedSecrets(secret1, secret2 []byte) []byte {
-	// Use XOR to combine secrets, then hash for final key derivation
-	combined := make([]byte, len(secret1))
-	for i := 0; i < len(secret1) && i < len(secret2); i++ {
-		combined[i] = secret1[i] ^ secret2[i]
-	}
-	
-	// Derive final key using the existing deriveSymmetricKey function
-	return deriveSymmetricKey(combined)
-}
 
 // generateTunnelID creates a unique identifier for a tunnel
 func generateTunnelID(localAddr, remoteAddr net.Addr) string {

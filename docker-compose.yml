@@ -1,0 +1,108 @@
+# QAVPN Hardened Relay - Docker Compose Configuration
+# Uses modern 'docker compose' command (not docker-compose)
+
+version: '3.8'
+
+services:
+  qavpn-relay:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        - BUILDKIT_INLINE_CACHE=1
+    image: qavpn-relay:latest
+    container_name: qavpn-relay-hardened
+    
+    # Security Configuration
+    security_opt:
+      - no-new-privileges:true
+      - apparmor:docker-default
+    
+    # Resource Limits (Security Hardening)
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 128M
+    
+    # Network Configuration
+    ports:
+      - "9051:9051/tcp"   # Relay port TCP
+      - "9051:9051/udp"   # Relay port UDP
+    
+    # Environment Variables
+    environment:
+      - QAVPN_RELAY_PORT=9051
+      - QAVPN_PROTOCOL=tcp
+      - QAVPN_LOG_LEVEL=1
+      - QAVPN_VERBOSE=true
+      - TZ=UTC
+    
+    # Volume Mounts (Read-only where possible)
+    volumes:
+      - relay-config:/etc/qavpn:ro
+      - relay-logs:/var/log/qavpn
+    
+    # Health Check
+    healthcheck:
+      test: ["/usr/local/bin/qavpn-relay", "status"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    
+    # Restart Policy
+    restart: unless-stopped
+    
+    # User Configuration (Non-root)
+    user: "65532:65532"
+    
+    # Capabilities (Drop all, add only necessary)
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE  # Only if binding to privileged ports
+    
+    # Network Mode
+    network_mode: bridge
+    
+    # DNS Configuration (Security)
+    dns:
+      - 1.1.1.1
+      - 1.0.0.1
+    
+    # Logging Configuration
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    
+    # Labels for management
+    labels:
+      - "com.qavpn.service=relay"
+      - "com.qavpn.version=0.1.0"
+      - "com.qavpn.security=hardened"
+
+# Named Volumes
+volumes:
+  relay-config:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ./docker/relay-config.conf
+  
+  relay-logs:
+    driver: local
+
+# Networks (Optional: Custom network for additional isolation)
+networks:
+  default:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
