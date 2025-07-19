@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -56,26 +57,6 @@ type HealthCheck struct {
 	Critical    bool // If true, failure affects overall system health
 }
 
-// HealthCheckResult contains the result of a health check
-type HealthCheckResult struct {
-	Name        string        `json:"name"`
-	Status      HealthStatus  `json:"status"`
-	Message     string        `json:"message"`
-	Duration    time.Duration `json:"duration"`
-	Timestamp   time.Time     `json:"timestamp"`
-	Details     interface{}   `json:"details,omitempty"`
-	Error       string        `json:"error,omitempty"`
-}
-
-// HealthStatus represents the health status
-type HealthStatus string
-
-const (
-	HealthStatusHealthy   HealthStatus = "healthy"
-	HealthStatusDegraded  HealthStatus = "degraded"
-	HealthStatusUnhealthy HealthStatus = "unhealthy"
-	HealthStatusFailed    HealthStatus = "failed"
-)
 
 // ProductionMetricsCollector collects production-specific metrics
 type ProductionMetricsCollector struct {
